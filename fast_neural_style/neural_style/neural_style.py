@@ -65,11 +65,12 @@ def train(args):
         agg_style_loss = 0.
         count = 0
         for batch_id, (x, _) in enumerate(train_loader):
+            x = x.to(device)
             n_batch = len(x)
             count += n_batch
             optimizer.zero_grad()
 
-            y = transformer(x.to(device))
+            y = transformer(x)
 
             y = utils.normalize_batch(y)
             x = utils.normalize_batch(x)

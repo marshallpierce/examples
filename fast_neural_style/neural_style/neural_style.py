@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import re
+from torch.multiprocessing import Process, Queue
 
 import numpy as np
 import torch
@@ -28,6 +29,35 @@ def check_paths(args):
         sys.exit(1)
 
 
+def enqueue_loader_output(batch_queue: Queue, control_queue: Queue, loader):
+    while True:
+        ctrl = control_queue.get()
+        if ctrl is False:
+            break
+        for batch_id, (x, _) in enumerate(loader):
+            batch_queue.put((batch_id, x))
+        batch_queue.put(None)
+
+
+class QueueIterator:
+    """
+    An Iterator over a Queue's contents that stops when it receives a None
+    """
+    def __init__(self, q: Queue):
+        self.q = q
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        thing = self.q.get()
+
+        if thing is None:
+            raise StopIteration()
+
+        return thing
+
+
 def train(args):
     device = torch.device("cuda" if args.cuda else "cpu")
 
@@ -47,6 +77,12 @@ def train(args):
     optimizer = Adam(transformer.parameters(), args.lr)
     mse_loss = torch.nn.MSELoss()
 
+    # for some reason, have to fork before style_transform or the worker process hangs on waitpid...?
+    # thus, we can't just new queues each time, so we use a control queue
+    batch_queue = Queue(100)
+    control_queue = Queue()
+    Process(target=enqueue_loader_output, args=(batch_queue, control_queue, train_loader)).start()
+
     vgg = Vgg16(requires_grad=False).to(device)
     style_transform = transforms.Compose([
         transforms.ToTensor(),
@@ -64,7 +100,9 @@ def train(args):
         agg_content_loss = 0.
         agg_style_loss = 0.
         count = 0
-        for batch_id, (x, _) in enumerate(train_loader):
+
+        control_queue.put(True)
+        for batch_id, x in QueueIterator(batch_queue):
             x = x.to(device)
             n_batch = len(x)
             count += n_batch
@@ -108,6 +146,7 @@ def train(args):
                 ckpt_model_path = os.path.join(args.checkpoint_model_dir, ckpt_model_filename)
                 torch.save(transformer.state_dict(), ckpt_model_path)
                 transformer.to(device).train()
+    control_queue.put(False)
 
     # save model
     transformer.eval().cpu()
